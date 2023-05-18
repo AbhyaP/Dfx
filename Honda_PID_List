@@ -1,0 +1,59 @@
+-- approximately last 12 months
+-- get a list of months based on the calendar month starts but take the broadcast month date ranges to use with respondent weights
+with months as (
+    select
+    c.broadcastyear as year
+    , c.broadcastmonthnumber as month
+    , (c.broadcastyear || '-' || c.broadcastmonthnumber || '-1')::date as calendar_month_start_date
+    , min(c.broadcastdate) as broadcast_month_start_date    
+    , max(c.broadcastdate) as broadcast_month_end_date
+    from dfx_global.reference.calendar c
+    group by c.broadcastyear, c.broadcastmonthnumber, calendar_month_start_date
+    having broadcast_month_end_date > dateadd(month, -14, current_date)
+    order by broadcast_month_start_date
+)
+
+, mri_questions as (
+    select q.category, q.sub_category, q.mri_question, min(qd.month_date) as first_date, max(qd.month_date) as last_date
+    from dfx_mri.public.mri_question q
+    inner join dfx_mri.public.mri_question_date qd
+    on q.mri_question_id = qd.mri_question_id
+    group by q.category, q.sub_category, q.mri_question
+)
+
+select 
+-- the _respondent_key field is household_number|person_id|date
+-- for Nielsen PIDs we want the first two but not the last like this: 6380306|1
+array_to_string(array_slice(split(r._respondent_key, '|'), 0, 2), '|') as respondent_id
+, m.calendar_month_start_date as month_date
+-- average the weights in case they're different within the broadcast month date ranges
+, avg(w.monthly_unified_weight) as weight
+
+from months m
+
+-- all person attributes that fall within the month broadcast dates
+inner join dfx_viewing_nielsen.viewing.person_attributes r
+on r.end_effective_date >= m.broadcast_month_start_date 
+and r.start_effective_date <= m.broadcast_month_end_date
+
+inner join dfx_viewing_nielsen.viewing.household_attributes h
+on r._household_key = h._household_key
+
+-- weights from Sundays within the broadcast month date ranges where the monthly_unified_weight is > 0
+inner join dfx_viewing_nielsen.viewing.person_weights w
+on r.person_id = w.person_id
+and date_part(weekday, w.report_date) = 0
+and w.report_date between m.broadcast_month_start_date and m.broadcast_month_end_date
+and w.monthly_unified_weight > 0
+
+-- household and repondent attributes
+where 
+r.age between 25 and 49
+and h.household_income_5k_mid_point_amount >= 50000
+
+group by
+respondent_id
+, m.calendar_month_start_date
+
+order by m.calendar_month_start_date
+;
